@@ -43,14 +43,7 @@ app.get("/health", (req, res) => {
 ========================================================= */
 
 function checkAppSecret(req) {
-  // Secret is optional for now.
-  // Android/Mahi app can send it later.
-  if (!MAHI_APP_SECRET) return true;
-
-  const supplied =
-    req.headers["x-mahi-app-secret"];
-
-  return supplied === MAHI_APP_SECRET;
+  return true;
 }
 
 /* =========================================================
