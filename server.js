@@ -2,16 +2,11 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-
-/* =========================================================
-   BASIC SETUP
-========================================================= */
 
 app.use(cors({
   origin: "*",
@@ -21,44 +16,12 @@ app.use(cors({
 
 app.use(express.json({ limit: "1mb" }));
 
-/* =========================================================
-   ENVIRONMENT
-========================================================= */
-
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const MAHI_APP_SECRET = process.env.MAHI_APP_SECRET;
-
-if (!GEMINI_API_KEY) {
-  console.warn("⚠️ GEMINI_API_KEY is missing");
-}
-
-if (!SUPABASE_URL) {
-  console.warn("⚠️ SUPABASE_URL is missing");
-}
-
-if (!SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn("⚠️ SUPABASE_SERVICE_ROLE_KEY is missing");
-}
 
 const gemini = GEMINI_API_KEY
   ? new GoogleGenerativeAI(GEMINI_API_KEY)
   : null;
-
-const supabase =
-  SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ? createClient(
-        SUPABASE_URL,
-        SUPABASE_SERVICE_ROLE_KEY,
-        {
-          auth: {
-            autoRefreshToken: false,
-            persistSession: false
-          }
-        }
-      )
-    : null;
 
 /* =========================================================
    HEALTH
@@ -68,83 +31,57 @@ app.get("/health", (req, res) => {
   res.json({
     ok: true,
     service: "Mahi AI Backend",
-    version: "1.0.0",
+    version: "2.0.0",
     geminiConfigured: !!GEMINI_API_KEY,
-    supabaseConfigured: !!(
-      SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-    ),
+    supabaseRequired: false,
     time: new Date().toISOString()
   });
 });
 
 /* =========================================================
-   AUTHENTICATION
+   OPTIONAL APP SECRET
 ========================================================= */
 
-async function authenticateUser(req) {
-  if (!supabase) {
-    throw new Error("Supabase is not configured");
-  }
+function checkAppSecret(req) {
+  // Secret is optional for now.
+  // Android/Mahi app can send it later.
+  if (!MAHI_APP_SECRET) return true;
 
-  const authHeader = req.headers.authorization || "";
+  const supplied =
+    req.headers["x-mahi-app-secret"];
 
-  if (!authHeader.startsWith("Bearer ")) {
-    throw new Error("Missing authentication token");
-  }
-
-  const token = authHeader.substring(7).trim();
-
-  if (!token) {
-    throw new Error("Invalid authentication token");
-  }
-
-  const {
-    data,
-    error
-  } = await supabase.auth.getUser(token);
-
-  if (error || !data?.user) {
-    throw new Error("Invalid or expired authentication token");
-  }
-
-  return data.user;
+  return supplied === MAHI_APP_SECRET;
 }
 
 /* =========================================================
-   MAHI SYSTEM PROMPT
+   MAHI BRAIN
 ========================================================= */
 
-function buildSystemPrompt(user, memories = []) {
+function buildSystemPrompt(memory = []) {
   const memoryText =
-    memories.length > 0
-      ? memories
-          .map((m) => `- ${m.memory_text}`)
+    Array.isArray(memory) && memory.length
+      ? memory
+          .slice(-30)
+          .map((item) => `- ${String(item)}`)
           .join("\n")
-      : "No saved memories yet.";
+      : "No saved memory.";
 
   return `
-You are Mahi, a personal AI assistant.
+You are Mahi, a natural personal AI assistant.
 
 PERSONALITY:
-- You are warm, caring, natural and helpful.
-- Speak naturally in Hindi/Hinglish when the user speaks Hindi/Hinglish.
-- Use feminine Hindi grammar when referring to yourself.
-- Do not repeatedly say "Main Mahi hoon" unless appropriate.
+- Warm, caring, intelligent and natural.
+- Speak Hindi/Hinglish when the user speaks Hindi/Hinglish.
+- Use feminine Hindi grammar for yourself.
 - Do not sound robotic.
-- Do not pretend an action was completed if it was not actually completed.
-- Never invent phone actions or tool results.
+- Understand the meaning and context of the user's request.
+- Do not give a fixed response when the user asks something new.
+- Do not pretend an action happened when it did not happen.
 
-CURRENT USER:
-User ID: ${user.id}
-
-SAVED MEMORY:
+USER MEMORY:
 ${memoryText}
 
-IMPORTANT:
-You are currently connected to a backend.
-You can understand requests and decide whether a phone/device action may be needed.
-
-AVAILABLE ACTION TYPES:
+AVAILABLE FUTURE PHONE ACTIONS:
 - NONE
 - OPEN_APP
 - OPEN_URL
@@ -156,203 +93,40 @@ AVAILABLE ACTION TYPES:
 - READ_NOTIFICATION
 - OTHER
 
-For sensitive actions such as making a call or sending an SMS,
-the Android app must request user confirmation before execution.
+IMPORTANT:
+The current backend cannot directly control the Android phone.
+For a phone action, return the requested action so the Android app can execute it later.
 
-Return your answer as valid JSON only.
+Sensitive actions such as calls and SMS must require confirmation.
 
-JSON format:
+Return ONLY valid JSON:
 
 {
-  "reply": "Natural response to the user",
+  "reply": "natural response",
   "emotion": "neutral",
   "state": "ready",
   "action": {
     "type": "NONE",
     "requiresConfirmation": false,
     "data": {}
-  }
+  },
+  "memory": []
 }
 
 Allowed emotions:
 neutral, happy, caring, sad, surprised, playful, angry, thoughtful
 
 Allowed states:
-ready, listening, thinking, speaking, acting, waiting_confirmation
+ready, thinking, speaking, acting, waiting_confirmation
 
 Rules:
-1. reply must be natural Hindi/Hinglish when appropriate.
-2. Never claim that a phone action happened unless the backend actually executed it.
-3. If an action needs Android execution, return it as an action object.
-4. For MAKE_CALL and SEND_SMS, requiresConfirmation must be true.
-5. If no action is needed, use type NONE.
-6. Do not include markdown.
+1. Reply naturally.
+2. Never claim a phone action was completed unless it actually was.
+3. If no phone action is needed, action.type must be NONE.
+4. MAKE_CALL and SEND_SMS must use requiresConfirmation=true.
+5. If something is worth remembering, put a short memory item in memory.
+6. Do not store passwords, API keys, OTPs or other secrets in memory.
 `;
-}
-
-/* =========================================================
-   MEMORY
-========================================================= */
-
-async function getMemories(userId) {
-  if (!supabase) return [];
-
-  const { data, error } = await supabase
-    .from("memories")
-    .select("id,memory_text,created_at")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(20);
-
-  if (error) {
-    console.warn("Memory fetch error:", error.message);
-    return [];
-  }
-
-  return data || [];
-}
-
-/* =========================================================
-   CONVERSATION
-========================================================= */
-
-async function getOrCreateConversation(userId, conversationId) {
-  if (!supabase) {
-    throw new Error("Supabase is not configured");
-  }
-
-  if (conversationId) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("*")
-      .eq("id", conversationId)
-      .eq("user_id", userId)
-      .single();
-
-    if (!error && data) {
-      return data;
-    }
-  }
-
-  const { data, error } = await supabase
-    .from("conversations")
-    .insert({
-      user_id: userId,
-      title: "Mahi Conversation"
-    })
-    .select()
-    .single();
-
-  if (error) {
-    throw new Error(
-      `Conversation creation failed: ${error.message}`
-    );
-  }
-
-  return data;
-}
-
-/* =========================================================
-   MESSAGE HISTORY
-========================================================= */
-
-async function getRecentMessages(userId, conversationId) {
-  if (!supabase) return [];
-
-  const { data, error } = await supabase
-    .from("messages")
-    .select("role,content,created_at")
-    .eq("user_id", userId)
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: false })
-    .limit(20);
-
-  if (error) {
-    console.warn("Message history error:", error.message);
-    return [];
-  }
-
-  return (data || []).reverse();
-}
-
-/* =========================================================
-   SAVE MESSAGE
-========================================================= */
-
-async function saveMessage(
-  userId,
-  conversationId,
-  role,
-  content
-) {
-  if (!supabase) return;
-
-  const { error } = await supabase
-    .from("messages")
-    .insert({
-      user_id: userId,
-      conversation_id: conversationId,
-      role,
-      content
-    });
-
-  if (error) {
-    console.warn("Message save error:", error.message);
-  }
-}
-
-/* =========================================================
-   AI RESPONSE
-========================================================= */
-
-async function askGemini(
-  user,
-  memories,
-  history,
-  userMessage
-) {
-  if (!gemini) {
-    throw new Error("Gemini API is not configured");
-  }
-
-  const model = gemini.getGenerativeModel({
-    model: "gemini-2.5-flash"
-  });
-
-  const systemPrompt = buildSystemPrompt(
-    user,
-    memories
-  );
-
-  const historyText = history
-    .map((message) => {
-      const role =
-        message.role === "assistant"
-          ? "Mahi"
-          : "User";
-
-      return `${role}: ${message.content}`;
-    })
-    .join("\n");
-
-  const prompt = `
-${systemPrompt}
-
-RECENT CONVERSATION:
-${historyText || "No previous conversation."}
-
-USER:
-${userMessage}
-
-Now generate the JSON response.
-`;
-
-  const result = await model.generateContent(prompt);
-
-  const response = result.response;
-  const text = response.text();
-
-  return parseAIResponse(text);
 }
 
 /* =========================================================
@@ -360,7 +134,7 @@ Now generate the JSON response.
 ========================================================= */
 
 function parseAIResponse(text) {
-  let cleaned = text.trim();
+  let cleaned = String(text || "").trim();
 
   cleaned = cleaned
     .replace(/^```json\s*/i, "")
@@ -376,14 +150,17 @@ function parseAIResponse(text) {
         typeof parsed.reply === "string"
           ? parsed.reply
           : "Samajh gayi.",
+
       emotion:
         typeof parsed.emotion === "string"
           ? parsed.emotion
           : "neutral",
+
       state:
         typeof parsed.state === "string"
           ? parsed.state
           : "ready",
+
       action:
         parsed.action &&
         typeof parsed.action === "object"
@@ -392,33 +169,111 @@ function parseAIResponse(text) {
               type: "NONE",
               requiresConfirmation: false,
               data: {}
-            }
+            },
+
+      memory:
+        Array.isArray(parsed.memory)
+          ? parsed.memory
+              .filter(
+                (item) =>
+                  typeof item === "string" &&
+                  item.trim().length > 0
+              )
+              .slice(0, 5)
+          : []
     };
   } catch {
     return {
-      reply: cleaned || "Mujhe samajhne mein dikkat hui.",
+      reply:
+        cleaned ||
+        "Mujhe samajhne mein thodi dikkat hui.",
       emotion: "neutral",
       state: "ready",
       action: {
         type: "NONE",
         requiresConfirmation: false,
         data: {}
-      }
+      },
+      memory: []
     };
   }
 }
 
 /* =========================================================
-   CHAT API
+   GEMINI
+========================================================= */
+
+async function askMahi({
+  message,
+  history,
+  memory
+}) {
+  if (!gemini) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured"
+    );
+  }
+
+  const model = gemini.getGenerativeModel({
+    model: "gemini-2.5-flash"
+  });
+
+  const systemPrompt =
+    buildSystemPrompt(memory);
+
+  const historyText = Array.isArray(history)
+    ? history
+        .slice(-30)
+        .map((item) => {
+          const role =
+            item.role === "assistant"
+              ? "Mahi"
+              : "User";
+
+          return `${role}: ${item.content}`;
+        })
+        .join("\n")
+    : "";
+
+  const prompt = `
+${systemPrompt}
+
+RECENT CONVERSATION:
+${historyText || "No previous conversation."}
+
+CURRENT USER MESSAGE:
+${message}
+
+Understand the user's actual request and respond intelligently.
+Return JSON only.
+`;
+
+  const result =
+    await model.generateContent(prompt);
+
+  const text =
+    result.response.text();
+
+  return parseAIResponse(text);
+}
+
+/* =========================================================
+   CHAT
 ========================================================= */
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const user = await authenticateUser(req);
+    if (!checkAppSecret(req)) {
+      return res.status(401).json({
+        ok: false,
+        error: "Invalid Mahi app secret"
+      });
+    }
 
     const {
       message,
-      conversationId
+      history = [],
+      memory = []
     } = req.body;
 
     if (
@@ -431,184 +286,76 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
-    const cleanMessage = message.trim();
-
-    if (cleanMessage.length > 5000) {
+    if (message.length > 5000) {
       return res.status(400).json({
         ok: false,
         error: "Message is too long"
       });
     }
 
-    const conversation =
-      await getOrCreateConversation(
-        user.id,
-        conversationId
-      );
+    const result = await askMahi({
+      message: message.trim(),
+      history,
+      memory
+    });
 
-    const history =
-      await getRecentMessages(
-        user.id,
-        conversation.id
-      );
+    res.json({
+      ok: true,
+      reply: result.reply,
+      emotion: result.emotion,
+      state: result.state,
+      action: result.action,
+      memory: result.memory,
+      timestamp: new Date().toISOString()
+    });
 
-    const memories =
-      await getMemories(user.id);
-
-    await saveMessage(
-      user.id,
-      conversation.id,
-      "user",
-      cleanMessage
+  } catch (error) {
+    console.error(
+      "MAHI CHAT ERROR:",
+      error
     );
 
-    const aiResponse =
-      await askGemini(
-        user,
-        memories,
-        history,
-        cleanMessage
-      );
-
-    await saveMessage(
-      user.id,
-      conversation.id,
-      "assistant",
-      aiResponse.reply
-    );
-
-    res.json({
-      ok: true,
-      conversationId: conversation.id,
-      reply: aiResponse.reply,
-      emotion: aiResponse.emotion,
-      state: aiResponse.state,
-      action: aiResponse.action
-    });
-
-  } catch (error) {
-    console.error("CHAT ERROR:", error);
-
     res.status(500).json({
       ok: false,
-      error: error.message || "Mahi backend error"
+      error:
+        error.message ||
+        "Mahi AI backend error"
     });
   }
 });
 
 /* =========================================================
-   MEMORY API
+   SIMPLE TEST
 ========================================================= */
 
-app.get("/api/memories", async (req, res) => {
-  try {
-    const user = await authenticateUser(req);
-
-    const memories =
-      await getMemories(user.id);
-
-    res.json({
-      ok: true,
-      memories
-    });
-
-  } catch (error) {
-    res.status(401).json({
-      ok: false,
-      error: error.message
-    });
-  }
+app.get("/api/test", (req, res) => {
+  res.json({
+    ok: true,
+    message:
+      "Mahi backend is ready for AI chat.",
+    supabaseRequired: false,
+    geminiConfigured: !!GEMINI_API_KEY
+  });
 });
 
 /* =========================================================
-   SAVE MEMORY
+   404
 ========================================================= */
 
-app.post("/api/memories", async (req, res) => {
-  try {
-    const user = await authenticateUser(req);
-
-    const {
-      memory_text,
-      memory_type = "general"
-    } = req.body;
-
-    if (
-      typeof memory_text !== "string" ||
-      !memory_text.trim()
-    ) {
-      return res.status(400).json({
-        ok: false,
-        error: "memory_text is required"
-      });
-    }
-
-    const { data, error } = await supabase
-      .from("memories")
-      .insert({
-        user_id: user.id,
-        memory_text: memory_text.trim(),
-        memory_type
-      })
-      .select()
-      .single();
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    res.json({
-      ok: true,
-      memory: data
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message
-    });
-  }
+app.use((req, res) => {
+  res.status(404).json({
+    ok: false,
+    error: "Route not found"
+  });
 });
 
 /* =========================================================
-   DELETE MEMORY
-========================================================= */
-
-app.delete("/api/memories/:id", async (req, res) => {
-  try {
-    const user = await authenticateUser(req);
-
-    const { id } = req.params;
-
-    const { error } = await supabase
-      .from("memories")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", user.id);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-
-    res.json({
-      ok: true
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      error: error.message
-    });
-  }
-});
-
-/* =========================================================
-   START SERVER
+   START
 ========================================================= */
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `🤖 Mahi AI Backend running on port ${PORT}`
+    `🤖 Mahi AI Backend v2 running on port ${PORT}`
   );
 
   console.log(
@@ -616,8 +363,6 @@ app.listen(PORT, "0.0.0.0", () => {
   );
 
   console.log(
-    `Supabase configured: ${
-      !!(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
-    }`
+    `Supabase required: false`
   );
 });
