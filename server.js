@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -21,6 +21,10 @@ const MAHI_APP_SECRET = process.env.MAHI_APP_SECRET;
 
 const gemini = GEMINI_API_KEY
   ? new GoogleGenerativeAI(GEMINI_API_KEY)
+  : null;
+
+const ttsClient = GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
   : null;
 
 /* =========================================================
@@ -313,6 +317,121 @@ app.post("/api/chat", async (req, res) => {
       error:
         error.message ||
         "Mahi AI backend error"
+    });
+  }
+});
+
+/* =========================================================
+   MAHI KORE TTS
+========================================================= */
+
+app.post("/api/tts", async (req, res) => {
+  try {
+    if (!ttsClient) {
+      return res.status(500).json({
+        ok: false,
+        error: "GEMINI_API_KEY is not configured"
+      });
+    }
+
+    const { text, emotion = "neutral" } = req.body;
+
+    if (
+      typeof text !== "string" ||
+      !text.trim()
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "Text is required"
+      });
+    }
+
+    if (text.length > 3000) {
+      return res.status(400).json({
+        ok: false,
+        error: "Text is too long"
+      });
+    }
+
+    const emotionStyle = {
+      happy: "warm, cheerful and friendly",
+      caring: "soft, caring and affectionate",
+      sad: "gentle, soft and emotional",
+      surprised: "bright and naturally surprised",
+      playful: "playful, cute and energetic",
+      angry: "firm but controlled",
+      thoughtful: "calm, thoughtful and natural",
+      neutral: "natural, warm and conversational"
+    };
+
+    const style =
+      emotionStyle[emotion] ||
+      emotionStyle.neutral;
+
+    const interaction =
+      await ttsClient.interactions.create({
+        model: "gemini-3.8-flash-tts",
+
+        input: [
+          {
+            type: "user_input",
+            content: [
+              {
+                type: "text",
+                text: text,
+                annotations: [
+                  {
+                    type: "speech_metadata",
+                    style: style
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+
+        response_format: {
+          type: "audio"
+        },
+
+        generation_config: {
+          speech_config: [
+            {
+              voice: "Kore"
+            }
+          ]
+        }
+      });
+
+    const audioData =
+      interaction?.output_audio?.data;
+
+    if (!audioData) {
+      return res.status(500).json({
+        ok: false,
+        error: "TTS audio was not generated"
+      });
+    }
+
+    res.json({
+      ok: true,
+      mimeType: "audio/wav",
+      audio: audioData,
+      voice: "Kore",
+      emotion: emotion
+    });
+
+  } catch (error) {
+    console.error(
+      "MAHI KORE TTS ERROR:",
+      error
+    );
+
+    res.status(500).json({
+      ok: false,
+      error:
+        error.message ||
+        "Mahi TTS error"
     });
   }
 });
